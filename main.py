@@ -36,20 +36,25 @@ class ClientOrder(StatesGroup):
     waiting_phone = State()
 
 # --- GEOJSON HUDUDNI ANIQLASH ---
-def get_station_name(lat, lon):
-    try:
-        with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        point = Point(lon, lat) # GeoJSONda (longitude, latitude)
-        for feature in data['features']:
-            polygon = shape(feature['geometry'])
-            if polygon.contains(point):
-                return feature['properties'].get('name', 'Noma'lum bekat')
-        return "Hududdan tashqarida"
-    except Exception as e:
-        print(f"GeoJSON xatosi: {e}")
-        return "Aniqlanmadi"
+def calculate_distance(lat1, lon1, lat2, lon2):
+    R = 6371000 
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi, dlambda = math.radians(lat2-lat1), math.radians(lon2-lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2) * math.sin(dlambda/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+def find_closest(u_lat, u_lon):
+    if not os.path.exists(GEOJSON_FILE): return "Noma'lum", 0
+    with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    closest, min_dist = None, float('inf')
+    for feat in data.get('features', []):
+        coords = feat.get('geometry', {}).get('coordinates')
+        name = feat.get('properties', {}).get('name', "Bekat")
+        dist = calculate_distance(u_lat, u_lon, coords[1], coords[0])
+        if dist < min_dist:
+            min_dist, closest = dist, name
+    return closest, min_dist
 
 # --- BAZA ---
 def init_db():
