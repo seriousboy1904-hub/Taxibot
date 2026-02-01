@@ -25,7 +25,7 @@ client_bot = Bot(token=CLIENT_TOKEN)
 driver_bot = Bot(token=DRIVER_TOKEN)
 client_dp, driver_dp = Dispatcher(), Dispatcher()
 
-# --- HOLATLAR (FSM) ---
+# --- HOLATLAR ---
 class DriverReg(StatesGroup):
     phone = State()
     car_model = State()
@@ -34,13 +34,13 @@ class DriverReg(StatesGroup):
 class ClientOrder(StatesGroup):
     waiting_phone = State()
 
-# --- BAZA BILAN ISHLASH ---
+# --- BAZA ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS drivers 
         (user_id INTEGER PRIMARY KEY, name TEXT, phone TEXT, car TEXT, car_num TEXT, 
-         station TEXT, lat REAL, lon REAL, status TEXT DEFAULT 'offline')''')
+         station TEXT, lat REAL, lon REAL, status TEXT DEFAULT 'offline', joined_at TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS trips 
         (driver_id INTEGER PRIMARY KEY, client_id INTEGER, client_phone TEXT,
          start_time REAL, wait_start REAL DEFAULT 0, total_wait REAL DEFAULT 0,
@@ -70,7 +70,7 @@ def find_station(lat, lon):
             d = get_dist(lat, lon, c[1], c[0])
             if d < min_dist: min_dist, closest = d, feat['properties']['name']
         return closest
-    except: return "Noma'lum"
+    except: return "Markaz"
 
 # ==========================================
 # 🚕 MIJOZ BOTI
@@ -93,40 +93,60 @@ async def client_order_final(message: types.Message, state: FSMContext):
     data = await state.get_data()
     c_lat, c_lon = data['lat'], data['lon']
     c_phone = message.contact.phone_number
-    station = find_station(c_lat, c_lon)
-    
+    await process_order(message.from_user.id, message.from_user.full_name, c_phone, c_lat, c_lon)
+    await message.answer("⏳ Buyurtma haydovchilarga yuborildi.", reply_markup=ReplyKeyboardRemove())
+    await state.clear()
+
+async def process_order(c_id, c_name, c_phone, lat, lon, exclude_drivers=[]):
+    station = find_station(lat, lon)
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, name, lat, lon FROM drivers WHERE status = 'online' AND station = ? LIMIT 1", (station,))
+    
+    query = f"SELECT user_id, name, lat, lon FROM drivers WHERE status = 'online' AND station = ?"
+    if exclude_drivers:
+        placeholders = ','.join(['?'] * len(exclude_drivers))
+        query += f" AND user_id NOT IN ({placeholders})"
+    
+    cursor.execute(query + " ORDER BY joined_at ASC LIMIT 1", (station, *exclude_drivers) if exclude_drivers else (station,))
     driver = cursor.fetchone()
     conn.close()
 
     if driver:
         d_id, d_name, d_lat, d_lon = driver
-        dist = get_dist(d_lat, d_lon, c_lat, c_lon)
-        ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Qabul qilish", callback_data=f"acc_{message.from_user.id}_{c_phone}")]])
-        
-        await driver_bot.send_location(d_id, c_lat, c_lon)
-        await driver_bot.send_message(d_id, f"🚕 YANGI BUYURTMA!\n👤 Mijoz: {message.from_user.full_name}\n📞 {c_phone}\n📏 Masofa: {dist:.1f} km", reply_markup=ikb)
-        await message.answer(f"⏳ Buyurtma haydovchiga ({d_name}) yuborildi.", reply_markup=ReplyKeyboardRemove())
+        dist = get_dist(d_lat, d_lon, lat, lon)
+        ikb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Qabul qilish", callback_data=f"acc_{c_id}_{c_phone}_{lat}_{lon}")],
+            [InlineKeyboardButton(text="🔄 O'tkazib yuborish", callback_data=f"skip_{c_id}_{c_phone}_{lat}_{lon}")]
+        ])
+        await driver_bot.send_location(d_id, lat, lon)
+        await driver_bot.send_message(d_id, f"🚕 YANGI BUYURTMA!\n👤 Mijoz: {c_name}\n📞 {c_phone}\n📏 Masofa: {dist:.1f} km", reply_markup=ikb)
     else:
-        await message.answer("🚕 Hozircha bo'sh haydovchi yo'q, buyurtma guruhga yuborildi.")
-        # Guruhga yuborish logikasi...
-    await state.clear()
+        # Guruhga yuborish
+        bot_me = await driver_bot.get_me()
+        link = f"https://t.me/{bot_me.username}?start=gr_{c_id}_{lat}_{lon}_{c_phone}"
+        ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Buyurtmani olish", url=link)]])
+        await client_bot.send_location(GROUP_ID, lat, lon)
+        await client_bot.send_message(GROUP_ID, f"📢 OCHIQ BUYURTMA!\n📍 Bekat: {station}\n👤 Mijoz: {c_name}", reply_markup=ikb)
 
 # ==========================================
-# 👨‍✈️ HAYDOVCHI BOTI (REGISTRATSIYA)
+# 👨‍✈️ HAYDOVCHI BOTI
 # ==========================================
 
 @driver_dp.message(Command("start"))
-async def driver_start_cmd(message: types.Message, state: FSMContext):
+async def driver_start_cmd(message: types.Message, command: CommandObject = None, state: FSMContext = None):
+    # Guruhdan kelgan buyurtmani olish
+    if command and command.args and command.args.startswith("gr_"):
+        _, c_id, lat, lon, c_phone = command.args.split("_")
+        await start_trip_logic(message.from_user.id, int(c_id), c_phone, float(lat), float(lon))
+        return
+
     if is_registered(message.from_user.id):
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🟢 Ishni boshlash (Live)", request_location=True)]], resize_keyboard=True)
         await message.answer("Xush kelibsiz! Ishni boshlash uchun lokatsiya yuboring.", reply_markup=kb)
     else:
         await state.set_state(DriverReg.phone)
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Raqamni yuborish", request_contact=True)]], resize_keyboard=True)
-        await message.answer("Tizimdan foydalanish uchun ro'yxatdan o'ting.\n\nTelefon raqamingizni yuboring:", reply_markup=kb)
+        await message.answer("Ro'yxatdan o'tish: Telefon raqamingizni yuboring:", reply_markup=kb)
 
 @driver_dp.message(DriverReg.phone, F.contact)
 async def reg_phone(message: types.Message, state: FSMContext):
@@ -134,58 +154,65 @@ async def reg_phone(message: types.Message, state: FSMContext):
     cars = [["Nexia 3", "Cobalt"], ["Gentra", "Spark"], ["Damas"]]
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=c) for c in row] for row in cars], resize_keyboard=True)
     await state.set_state(DriverReg.car_model)
-    await message.answer("Mashinangiz rusumini tanlang:", reply_markup=kb)
+    await message.answer("Mashina rusumi:", reply_markup=kb)
 
 @driver_dp.message(DriverReg.car_model)
 async def reg_car(message: types.Message, state: FSMContext):
     await state.update_data(car=message.text)
     await state.set_state(DriverReg.car_number)
-    await message.answer("Mashina davlat raqamini kiriting (Masalan: 01A777AA):", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Mashina raqami (01A777AA):", reply_markup=ReplyKeyboardRemove())
 
 @driver_dp.message(DriverReg.car_number)
 async def reg_done(message: types.Message, state: FSMContext):
     data = await state.get_data()
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("INSERT OR REPLACE INTO drivers (user_id, name, phone, car, car_num, status) VALUES (?,?,?,?,?,?)",
-                 (message.from_user.id, message.from_user.full_name, data['phone'], data['car'], message.text, 'offline'))
+    conn.execute("INSERT OR REPLACE INTO drivers (user_id, name, phone, car, car_num, status, joined_at) VALUES (?,?,?,?,?,?,?)",
+                 (message.from_user.id, message.from_user.full_name, data['phone'], data['car'], message.text, 'offline', datetime.now().isoformat()))
     conn.commit()
     conn.close()
     await state.clear()
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🟢 Ishni boshlash (Live)", request_location=True)]], resize_keyboard=True)
-    await message.answer("✅ Ro'yxatdan o'tdingiz! Ishni boshlash uchun lokatsiya yuboring.", reply_markup=kb)
-
-# ==========================================
-# 🚖 SAFAR BOSHQARUVI
-# ==========================================
+    await message.answer("✅ Tayyor! Ishni boshlash tugmasini bosing.", reply_markup=kb)
 
 @driver_dp.message(F.location)
-async def driver_loc_handler(message: types.Message):
-    if not is_registered(message.from_user.id):
-        await message.answer("Oldin ro'yxatdan o'ting! /start")
-        return
-    
-    # Agar haydovchi safar yakunlash tugmasini bossa (lokatsiya orqali), bu funksiya ishlaydi
-    # Lekin biz Inline tugmalar orqali ishlaymiz. Shunchaki Online qilish:
+async def driver_online(message: types.Message):
+    if not is_registered(message.from_user.id): return
     lat, lon = message.location.latitude, message.location.longitude
     station = find_station(lat, lon)
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("UPDATE drivers SET status='online', station=?, lat=?, lon=? WHERE user_id=?", (station, lat, lon, message.from_user.id))
+    conn.execute("UPDATE drivers SET status='online', station=?, lat=?, lon=?, joined_at=? WHERE user_id=?", 
+                 (station, lat, lon, datetime.now().isoformat(), message.from_user.id))
     conn.commit()
     conn.close()
     await message.answer(f"✅ Siz onlinesiz!\n📍 Bekat: {station}")
 
+# --- CALLBACKS ---
+
+@driver_dp.callback_query(F.data.startswith("skip_"))
+async def skip_order(call: CallbackQuery):
+    _, c_id, c_phone, lat, lon = call.data.split("_")
+    await call.message.edit_text("🔄 Buyurtma o'tkazib yuborildi.")
+    # Keyingi haydovchiga yuborish (joriy haydovchini exclude qilib)
+    await process_order(int(c_id), "Mijoz", c_phone, float(lat), float(lon), exclude_drivers=[call.from_user.id])
+
 @driver_dp.callback_query(F.data.startswith("acc_"))
-async def accept_order(call: CallbackQuery):
-    _, c_id, c_phone = call.data.split("_")
+async def accept_order_call(call: CallbackQuery):
+    _, c_id, c_phone, lat, lon = call.data.split("_")
+    await start_trip_logic(call.from_user.id, int(c_id), c_phone, float(lat), float(lon), call.message)
+
+async def start_trip_logic(d_id, c_id, c_phone, lat, lon, message=None):
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("INSERT OR REPLACE INTO trips (driver_id, client_id, client_phone) VALUES (?,?,?)", (call.from_user.id, c_id, c_phone))
-    conn.execute("UPDATE drivers SET status='busy' WHERE user_id=?", (call.from_user.id,))
+    conn.execute("INSERT OR REPLACE INTO trips (driver_id, client_id, client_phone, s_lat, s_lon) VALUES (?,?,?,?,?)", 
+                 (d_id, c_id, c_phone, lat, lon))
+    conn.execute("UPDATE drivers SET status='busy' WHERE user_id=?", (d_id,))
     conn.commit()
     conn.close()
 
     ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚕 Yetib keldim", callback_data="arrived")]])
-    await call.message.edit_text(f"✅ Qabul qilindi!\n📞 Mijoz raqami: {c_phone}", reply_markup=ikb)
-    await client_bot.send_message(c_id, "🚕 Haydovchi qabul qildi va yo'lga chiqdi!")
+    msg_text = f"✅ Safar boshlandi!\n📞 Mijoz: {c_phone}"
+    if message: await message.edit_text(msg_text, reply_markup=ikb)
+    else: await driver_bot.send_message(d_id, msg_text, reply_markup=ikb)
+    await client_bot.send_message(c_id, "🚕 Haydovchi buyurtmani qabul qildi!")
 
 @driver_dp.callback_query(F.data == "arrived")
 async def driver_arrived(call: CallbackQuery):
@@ -194,7 +221,6 @@ async def driver_arrived(call: CallbackQuery):
         [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_pre")]
     ])
     await call.message.edit_reply_markup(reply_markup=ikb)
-    
     conn = sqlite3.connect(DB_FILE)
     trip = conn.execute("SELECT client_id FROM trips WHERE driver_id=?", (call.from_user.id,)).fetchone()
     if trip: await client_bot.send_message(trip[0], "🚕 Haydovchi yetib keldi!")
@@ -204,7 +230,6 @@ async def wait_start(call: CallbackQuery):
     conn = sqlite3.connect(DB_FILE)
     conn.execute("UPDATE trips SET wait_start=? WHERE driver_id=?", (time.time(), call.from_user.id))
     conn.commit()
-    conn.close()
     ikb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Davom etish", callback_data="wait_stop")],
         [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_pre")]
@@ -219,8 +244,7 @@ async def wait_stop(call: CallbackQuery):
         added = (time.time() - trip[0]) / 60
         conn.execute("UPDATE trips SET wait_start=0, total_wait=total_wait+? WHERE driver_id=?", (added, call.from_user.id))
         conn.commit()
-    conn.close()
-    ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏁 Safarni yakunlash", callback_data="finish_pre")]])
+    ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏁 Yakunlash", callback_data="finish_pre")]])
     await call.message.edit_text("🚖 Safar davom etmoqda...", reply_markup=ikb)
 
 @driver_dp.callback_query(F.data == "cancel_pre")
@@ -228,7 +252,7 @@ async def cancel_pre(call: CallbackQuery):
     ikb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Ha", callback_data="cancel_yes"), InlineKeyboardButton(text="❌ Yo'q", callback_data="arrived")]
     ])
-    await call.message.edit_text("⚠️ Rostdan ham bekor qilmoqchimisiz?", reply_markup=ikb)
+    await call.message.edit_text("⚠️ Bekor qilinsinmi?", reply_markup=ikb)
 
 @driver_dp.callback_query(F.data == "cancel_yes")
 async def cancel_yes(call: CallbackQuery):
@@ -236,8 +260,7 @@ async def cancel_yes(call: CallbackQuery):
     conn.execute("DELETE FROM trips WHERE driver_id=?", (call.from_user.id,))
     conn.execute("UPDATE drivers SET status='online' WHERE user_id=?", (call.from_user.id,))
     conn.commit()
-    conn.close()
-    await call.message.edit_text("❌ Buyurtma bekor qilindi.")
+    await call.message.edit_text("❌ Bekor qilindi.")
 
 @driver_dp.callback_query(F.data == "finish_pre")
 async def finish_trip(call: CallbackQuery):
@@ -245,13 +268,12 @@ async def finish_trip(call: CallbackQuery):
     trip = conn.execute("SELECT client_id, total_wait FROM trips WHERE driver_id=?", (call.from_user.id,)).fetchone()
     if trip:
         price = START_PRICE + (int(trip[1]) * WAIT_PRICE)
-        res = f"🏁 Safar yakunlandi!\n💰 To'lov: {price} so'm\n⏳ Kutish: {int(trip[1])} daq"
+        res = f"🏁 Yakunlandi!\n💰 To'lov: {price} so'm\n⏳ Kutish: {int(trip[1])} daq"
         await call.message.edit_text(res)
         await client_bot.send_message(trip[0], res)
         conn.execute("DELETE FROM trips WHERE driver_id=?", (call.from_user.id,))
         conn.execute("UPDATE drivers SET status='online' WHERE user_id=?", (call.from_user.id,))
         conn.commit()
-    conn.close()
 
 async def main():
     init_db()
