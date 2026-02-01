@@ -18,11 +18,10 @@ load_dotenv()
 # --- KONFIGURATSIYA ---
 CLIENT_TOKEN = os.getenv("CLIENT_BOT_TOKEN")
 DRIVER_TOKEN = os.getenv("DRIVER_BOT_TOKEN")
-GROUP_ID = -1003356995649 # Guruh ID sini tekshiring
+GROUP_ID = -1003356995649 
 DB_FILE = 'taxi_master.db'
 GEOJSON_FILE = 'locations.json'
 
-# Tariflar
 START_PRICE = 5000
 KM_PRICE = 3500
 WAIT_PRICE = 500
@@ -30,11 +29,10 @@ WAIT_PRICE = 500
 client_bot = Bot(token=CLIENT_TOKEN)
 driver_bot = Bot(token=DRIVER_TOKEN)
 
-# Ikkita alohida dispatcher xatolarni oldini oladi
 client_dp = Dispatcher()
 driver_dp = Dispatcher()
 
-# --- BAZA FUNKSIYALARI ---
+# --- BAZA VA GEOLOKATSIYA ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -57,18 +55,19 @@ def find_station(lat, lon):
     try:
         with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        closest, min_dist = "Nukus", float('inf')
+        closest, min_dist = "Markaz", float('inf')
         for feat in data['features']:
             c = feat['geometry']['coordinates']
             d = get_dist(lat, lon, c[1], c[0])
             if d < min_dist:
                 min_dist, closest = d, feat['properties']['name']
-        return closest
-    except:
+        return closest.strip() # Bo'sh joylarni tozalash
+    except Exception as e:
+        print(f"Geojson xatosi: {e}")
         return "Markaz"
 
 # ==========================================
-# 🚕 MIJOZ BOTI (client_dp)
+# 🚕 MIJOZ BOTI
 # ==========================================
 
 @client_dp.message(Command("start"))
@@ -83,52 +82,57 @@ async def client_start(message: types.Message):
 async def client_loc(message: types.Message):
     lat, lon = message.location.latitude, message.location.longitude
     station = find_station(lat, lon)
+    
+    print(f"\n🔍 QIDIRUV: Mijoz bekati: {station}")
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Eng birinchi navbatga turgan haydovchini olish
-    cursor.execute("SELECT user_id, name FROM drivers WHERE station = ? AND status = 'online' ORDER BY joined_at ASC LIMIT 1", (station,))
+    # Bazadan online haydovchini qidirish
+    cursor.execute("SELECT user_id, name FROM drivers WHERE status = 'online' AND station = ? ORDER BY joined_at ASC LIMIT 1", (station,))
     driver = cursor.fetchone()
     conn.close()
 
     if driver:
+        d_id, d_name = driver
+        print(f"✅ TOPILDI: Haydovchi {d_name} (ID: {d_id})")
+        
         ikb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Qabul qilish", callback_data=f"acc_{message.from_user.id}_{lat}_{lon}"),
-                InlineKeyboardButton(text="🔄 Guruhga yuborish", callback_data=f"skip_{message.from_user.id}_{station}_{lat}_{lon}")
+                InlineKeyboardButton(text="🔄 O'tkazib yuborish", callback_data=f"skip_{message.from_user.id}_{station}_{lat}_{lon}")
             ]
         ])
         
         try:
-            # Haydovchiga shaxsiy xabar yuborish
             await driver_bot.send_message(
-                driver[0],
+                d_id,
                 f"🚕 YANGI BUYURTMA!\n📍 Bekat: {station}\n👤 Mijoz: {message.from_user.full_name}\n\nQabul qilasizmi?",
                 reply_markup=ikb
             )
-            await message.answer(f"⏳ Buyurtmangiz {station} bekatidagi haydovchiga yuborildi. Kuting...")
-        except:
+            await message.answer(f"⏳ Buyurtma {station} bekatidagi haydovchiga ({d_name}) yuborildi.")
+        except Exception as e:
+            print(f"❌ XATOLIK: Haydovchiga xabar ketmadi: {e}")
             await send_to_group(message, station, lat, lon)
     else:
+        print("ℹ️ STATUS: Bo'sh haydovchi yo'q, guruhga yuborilmoqda.")
         await send_to_group(message, station, lat, lon)
 
 async def send_to_group(message, station, lat, lon):
-    bot_info = await driver_bot.get_me()
-    link = f"https://t.me/{bot_info.username}?start=gr_{message.from_user.id}_{lat}_{lon}"
+    bot_me = await driver_bot.get_me()
+    link = f"https://t.me/{bot_me.username}?start=gr_{message.from_user.id}_{lat}_{lon}"
     ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Buyurtmani olish", url=link)]])
     
     await client_bot.send_location(GROUP_ID, lat, lon)
     await client_bot.send_message(GROUP_ID, f"📢 OCHIQ BUYURTMA!\n📍 Bekat: {station}\n👤 Mijoz: {message.from_user.full_name}", reply_markup=ikb)
-    await message.answer("🚕 Bekatda bo‘sh haydovchi yo‘q, buyurtma guruhga yuborildi.")
+    await message.answer("🚕 Hozircha bo'sh haydovchi yo'q, buyurtma guruhga yuborildi.")
 
 # ==========================================
-# 👨‍✈️ HAYDOVCHI BOTI (driver_dp)
+# 👨‍✈️ HAYDOVCHI BOTI
 # ==========================================
 
 @driver_dp.message(Command("start"))
 async def driver_start(message: types.Message, command: CommandObject):
     if command.args and command.args.startswith("gr_"):
-        # Guruhdan kelgan buyurtmani qabul qilish
         parts = command.args.split("_")
         client_id, c_lat, c_lon = int(parts[1]), float(parts[2]), float(parts[3])
         await start_trip_engine(message.from_user.id, client_id, c_lat, c_lon)
@@ -137,14 +141,18 @@ async def driver_start(message: types.Message, command: CommandObject):
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🟢 Ishni boshlash (Live)", request_location=True)],
-            [KeyboardButton(text="🏁 Safarni yakunlash"), KeyboardButton(text="⏳ Kutish")],
+            [KeyboardButton(text="🏁 Yakunlash", request_location=True), KeyboardButton(text="⏳ Kutish")],
             [KeyboardButton(text="📴 Offline")]
         ], resize_keyboard=True
     )
-    await message.answer("👨‍✈️ Haydovchi paneli. Ishni boshlash uchun Live lokatsiya yuboring.", reply_markup=kb)
+    await message.answer("👨‍✈️ Haydovchi paneli. Ishni boshlash uchun lokatsiya yuboring.", reply_markup=kb)
 
 @driver_dp.message(F.location)
-async def driver_update_status(message: types.Message):
+async def driver_status_online(message: types.Message):
+    # Safar yakunlanayotgan bo'lsa, bu yerda to'xtatamiz
+    if message.reply_to_message or "Yakunlash" in (message.text or ""):
+        return 
+
     lat, lon = message.location.latitude, message.location.longitude
     station = find_station(lat, lon)
     
@@ -154,13 +162,15 @@ async def driver_update_status(message: types.Message):
                    (message.from_user.id, message.from_user.full_name, station, datetime.now().isoformat()))
     conn.commit()
     conn.close()
-    await message.answer(f"✅ Status: Online\n📍 Bekat: {station}")
+    
+    print(f"🆕 HAYDOVCHI ONLINE: {message.from_user.full_name} | Bekat: {station}")
+    await message.answer(f"✅ Siz online holatdasiz!\n📍 Bekat: {station}\n\nBuyurtmalar tushsa sizga xabar beramiz.")
 
 @driver_dp.callback_query(F.data.startswith("acc_"))
-async def driver_accept(call: CallbackQuery):
-    _, client_id, c_lat, c_lon = call.data.split("_")
+async def driver_accept_call(call: CallbackQuery):
+    _, c_id, lat, lon = call.data.split("_")
     await call.message.edit_text("✅ Buyurtma qabul qilindi!")
-    await start_trip_engine(call.from_user.id, int(client_id), float(c_lat), float(c_lon))
+    await start_trip_engine(call.from_user.id, int(c_id), float(lat), float(lon))
 
 async def start_trip_engine(driver_id, client_id, c_lat, c_lon):
     conn = sqlite3.connect(DB_FILE)
@@ -171,9 +181,9 @@ async def start_trip_engine(driver_id, client_id, c_lat, c_lon):
     conn.commit()
     conn.close()
 
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⏳ Kutish")], [KeyboardButton(text="🏁 Safarni yakunlash", request_location=True)]], resize_keyboard=True)
-    await driver_bot.send_message(driver_id, "🚖 Safar boshlandi! Manzilga borgach 'Yakunlash' tugmasini bosing (lokatsiya bilan).", reply_markup=kb)
-    await client_bot.send_message(client_id, "🚕 Haydovchi buyurtmani qabul qildi va yo'lga chiqdi!")
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⏳ Kutish")], [KeyboardButton(text="🏁 Yakunlash", request_location=True)]], resize_keyboard=True)
+    await driver_bot.send_message(driver_id, "🚖 Safar boshlandi!", reply_markup=kb)
+    await client_bot.send_message(client_id, "🚕 Haydovchi buyurtmani qabul qildi!")
 
 @driver_dp.message(F.text == "⏳ Kutish")
 async def driver_wait_start(message: types.Message):
@@ -184,8 +194,9 @@ async def driver_wait_start(message: types.Message):
     conn.close()
     await message.answer("⏱ Kutish vaqti hisoblanmoqda...")
 
-@driver_dp.message(F.location, F.text == "🏁 Safarni yakunlash") # Lokatsiya bilan yakunlash
+@driver_dp.message(F.location)
 async def driver_end_trip(message: types.Message):
+    # Bu faqat "Yakunlash" bosilganda ishlaydi
     e_lat, e_lon = message.location.latitude, message.location.longitude
     
     conn = sqlite3.connect(DB_FILE)
@@ -196,10 +207,10 @@ async def driver_end_trip(message: types.Message):
     if trip:
         cid, s_time, w_start, s_lat, s_lon = trip
         
-        # Masofa va narx
-        distance = get_dist(s_lat, s_lon, e_lat, e_lon) * 1.2 # 1.2 egrilik koeffitsienti
-        wait_time = (time.time() - w_start) / 60 if w_start > 0 else 0
+        distance = get_dist(s_lat, s_lon, e_lat, e_lon) * 1.2
+        if distance < 0.5: distance = 0.0 # Juda yaqin bo'lsa 0 km
         
+        wait_time = (time.time() - w_start) / 60 if w_start > 0 else 0
         total_price = START_PRICE + (distance * KM_PRICE) + (wait_time * WAIT_PRICE)
         
         chek = (f"🏁 SAFAR YAKUNLANDI\n\n🛣 Masofa: {distance:.1f} km\n"
@@ -215,7 +226,7 @@ async def driver_end_trip(message: types.Message):
 
 async def main():
     init_db()
-    # Har ikkala botni bir vaqtda ishga tushirish
+    # Botlarni parallel ishga tushirish
     await asyncio.gather(
         client_dp.start_polling(client_bot),
         driver_dp.start_polling(driver_bot)
