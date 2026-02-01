@@ -6,141 +6,110 @@ import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandObject
-from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-)
+from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Muhit o'zgaruvchilarini yuklash
 load_dotenv()
-API_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = -1003356995649
-DB_FILE = 'taxi_system.db'
-GEOJSON_FILE = 'locations.json'
 
-bot = Bot(token=API_TOKEN)
+# Konfiguratsiya
+GROUP_ID = -1003356995649
+GEOJSON_FILE = 'locations.json'
+DB_FILE = 'unified_taxi.db'
+
+# Ikkala botni yaratish
+client_bot = Bot(token=os.getenv("CLIENT_BOT_TOKEN"))
+driver_bot = Bot(token=os.getenv("DRIVER_BOT_TOKEN"))
+
 dp = Dispatcher()
 
-# Tariflar (Megasorpa logikasi)
-START_PRICE, KM_PRICE, WAIT_PRICE = 5000, 3500, 500
-
-# --- BAZA BILAN ISHLASH ---
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     # Haydovchilar navbati
     cursor.execute('''CREATE TABLE IF NOT EXISTS queue 
         (user_id INTEGER PRIMARY KEY, name TEXT, station_name TEXT, 
-         lat REAL, lon REAL, status TEXT DEFAULT 'online', joined_at TEXT)''')
-    # Faol safarlar
-    cursor.execute('''CREATE TABLE IF NOT EXISTS trips 
-        (driver_id INTEGER PRIMARY KEY, client_id INTEGER, start_time TEXT, 
-         start_lat REAL, start_lon REAL, status TEXT)''')
+         status TEXT DEFAULT 'online', joined_at TEXT)''')
     conn.commit()
     conn.close()
 
-# --- GEOGRAFIYA (Haversine formula) ---
 def calculate_distance(lat1, lon1, lat2, lon2):
-    R = 6371 # km
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    R = 6371
+    dlat, dlon = math.radians(lat2-lat1), math.radians(lon2-lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-def find_closest_station(u_lat, u_lon):
-    if not os.path.exists(GEOJSON_FILE): return "Noma'lum"
+def find_closest(lat, lon):
     with open(GEOJSON_FILE, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    closest, min_dist = "Nukus", float('inf')
+    closest, min_dist = "Noma'lum", float('inf')
     for feat in data['features']:
         coords = feat['geometry']['coordinates']
-        dist = calculate_distance(u_lat, u_lon, coords[1], coords[0])
-        if dist < min_dist:
-            min_dist, closest = dist, feat['properties']['name']
+        dist = calculate_distance(lat, lon, coords[1], coords[0])
+        if dist < min_dist: min_dist, closest = dist, feat['properties']['name']
     return closest
 
-# --- ASOSIY HANDLERLAR ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, command: CommandObject):
-    # Deep linking (Haydovchi buyurtmani qabul qilganda)
-    if command.args and command.args.startswith("trip_"):
-        client_id = command.args.split("_")[1]
-        await start_trip_logic(message, client_id)
-        return
+# ==========================================
+# 🚕 MIJOZ BOTI FUNKSIYALARI (CLIENT BOT)
+# ==========================================
 
+@dp.message(Command("start"), F.bot.id == client_bot.id)
+async def client_start(message: types.Message):
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚕 Taxi chaqirish", request_location=True)]], resize_keyboard=True)
+    await message.answer("Xush kelibsiz! Taxi chaqirish uchun lokatsiyangizni yuboring.", reply_markup=kb)
+
+@dp.message(F.location, F.bot.id == client_bot.id)
+async def client_location(message: types.Message):
+    st = find_closest(message.location.latitude, message.location.longitude)
+    
+    # Guruhga buyurtma yuborish
+    await client_bot.send_location(GROUP_ID, message.location.latitude, message.location.longitude)
+    await client_bot.send_message(GROUP_ID, f"🚕 YANGI BUYURTMA\n📍 Bekat: {st}\n👤 Mijoz: {message.from_user.full_name}")
+    
+    await message.answer(f"✅ Rahmat! Buyurtmangiz {st} bekatidagi haydovchilarga yuborildi.")
+
+# ==========================================
+# 👨‍✈️ HAYDOVCHI BOTI FUNKSIYALARI (DRIVER BOT)
+# ==========================================
+
+@dp.message(Command("start"), F.bot.id == driver_bot.id)
+async def driver_start(message: types.Message):
     kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🚕 Taxi chaqirish", request_location=True)],
-        [KeyboardButton(text="👨‍✈️ Haydovchi: Navbatga turish", request_location=True)]
+        [KeyboardButton(text="🟢 Ishni boshlash (Live Location)", request_location=True)],
+        [KeyboardButton(text="☕️ Pauza"), KeyboardButton(text="📴 Offline")]
     ], resize_keyboard=True)
-    await message.answer("Xush kelibsiz! Kerakli bo'limni tanlang:", reply_markup=kb)
+    await message.answer("👨‍✈️ Haydovchi paneli. Navbatga turish uchun Live Location yuboring.", reply_markup=kb)
 
-# --- MIJOZ LOGIKASI ---
-@dp.message(F.location & ~F.location.live_period)
-async def customer_request(message: types.Message):
-    u_lat, u_lon = message.location.latitude, message.location.longitude
-    station = find_closest_station(u_lat, u_lon)
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, name FROM queue WHERE station_name = ? AND status = 'online' ORDER BY joined_at ASC LIMIT 1", (station,))
-    driver = cursor.fetchone()
-    conn.close()
-
-    if driver:
-        # Buyurtma tugmasi
-        link = f"https://t.me/{(await bot.get_me()).username}?start=trip_{message.from_user.id}"
-        ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Qabul qilish", url=link)]])
-        
-        await bot.send_location(GROUP_ID, u_lat, u_lon)
-        await bot.send_message(GROUP_ID, f"🚕 YANGI BUYURTMA\n📍 Bekat: {station}\n👤 Mijoz: {message.from_user.full_name}\n👨‍✈️ Navbatdagi: {driver[1]}", reply_markup=ikb)
-        await message.answer(f"⏳ Buyurtmangiz {station} bekatidagi haydovchiga yuborildi.")
-    else:
-        await message.answer(f"😔 Kechirasiz, {station} bekatida bo'sh haydovchi yo'q.")
-
-# --- HAYDOVCHI NAVBATI ---
-@dp.message(F.location & F.location.live_period)
-async def driver_queue_handler(message: types.Message):
-    lat, lon = message.location.latitude, message.location.longitude
-    st_name = find_closest_station(lat, lon)
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO queue (user_id, name, station_name, lat, lon, status, joined_at) VALUES (?, ?, ?, ?, ?, 'online', ?)",
-                   (message.from_user.id, message.from_user.full_name, st_name, lat, lon, datetime.now().isoformat()))
-    conn.commit(); conn.close()
-    
-    await message.answer(f"✅ Siz {st_name} bekatida navbatga turdingiz.\nStatus: Online")
-
-# --- TAKSOMETR VA SAFAR (Megasorpa engine) ---
-async def start_trip_logic(message, client_id):
-    # Safarni bazaga yozish
+@dp.message(F.location & F.location.live_period, F.bot.id == driver_bot.id)
+async def driver_queue(message: types.Message):
+    st = find_closest(message.location.latitude, message.location.longitude)
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO trips (driver_id, client_id, start_time, status) VALUES (?, ?, ?, 'started')",
-                   (message.from_user.id, client_id, datetime.now().isoformat()))
-    # Haydovchini navbatdan vaqtincha ochirish
-    cursor.execute("UPDATE queue SET status = 'busy' WHERE user_id = ?", (message.from_user.id,))
+    cursor.execute("INSERT OR REPLACE INTO queue (user_id, name, station_name, status, joined_at) VALUES (?, ?, ?, 'online', ?)",
+                   (message.from_user.id, message.from_user.full_name, st, datetime.now().isoformat()))
     conn.commit(); conn.close()
+    await message.answer(f"📍 Siz {st} bekati navbatiga turdingiz.")
 
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🏁 Safarni yakunlash")]], resize_keyboard=True)
-    await message.answer("🚖 Safar boshlandi. Manzilga yetgach tugmani bosing.", reply_markup=kb)
-    await bot.send_message(client_id, "🚕 Haydovchi buyurtmani qabul qildi va yo'lga chiqdi!")
-
-@dp.message(F.text == "🏁 Safarni yakunlash")
-async def finish_trip(message: types.Message):
-    # Bu yerda megasorpa dagi chek chiqarish logikasi bo'ladi
+@dp.message(F.text == "☕️ Pauza", F.bot.id == driver_bot.id)
+async def driver_pause(message: types.Message):
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
-    cursor.execute("DELETE FROM trips WHERE driver_id = ?", (message.from_user.id,))
-    cursor.execute("UPDATE queue SET status = 'online', joined_at = ? WHERE user_id = ?", 
-                   (datetime.now().isoformat(), message.from_user.id))
+    cursor.execute("UPDATE queue SET status = 'pauza' WHERE user_id = ?", (message.from_user.id,))
     conn.commit(); conn.close()
-    
-    await message.answer("✅ Safar yakunlandi. Siz yana navbatga qaytdingiz.", reply_markup=ReplyKeyboardRemove())
+    await message.answer("☕️ Tanaffus. Navbatingiz to'xtatildi.")
+
+# ==========================================
+# 🚀 IKKALA BOTNI ISHGA TUSHIRISH
+# ==========================================
 
 async def main():
     init_db()
-    print("Bot ishga tushdi...")
-    await dp.start_polling(bot)
+    # Har bir bot uchun dispatcher pollingni alohida boshlaydi
+    await asyncio.gather(
+        dp.start_polling(client_bot),
+        dp.start_polling(driver_bot)
+    )
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Botlar to'xtatildi")
