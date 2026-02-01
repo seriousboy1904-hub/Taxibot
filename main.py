@@ -51,7 +51,7 @@ def init_db():
     conn.close()
 
 def get_dist(lat1, lon1, lat2, lon2):
-    R = 6371 # km
+    R = 6371 # Yer radiusi km da
     dlat, dlon = math.radians(lat2-lat1), math.radians(lon2-lon1)
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
@@ -69,7 +69,7 @@ def find_station(lat, lon):
     except: return "Markaz"
 
 # ==========================================
-# 🔄 TAXIMETER UPDATER
+# 🔄 TAXIMETER MONITORING
 # ==========================================
 
 async def taximeter_loop(did):
@@ -90,19 +90,20 @@ async def taximeter_loop(did):
         summa = START_PRICE + (int(curr_wait) * WAIT_PRICE) + (total_dist * KM_PRICE)
         
         btns = []
-        # Ojidaniye Play/Pause
+        # 1. Ojidaniye Play/Pause
         if wait_start > 0:
             btns.append([InlineKeyboardButton(text="⏸ Pauza (Ojidaniye)", callback_data="wait_pause")])
         else:
             btns.append([InlineKeyboardButton(text="▶️ Ojidaniye (Play)", callback_data="wait_play")])
         
-        # Safarni boshlash (faqat hali boshlanmagan bo'lsa)
+        # 2. Safarni boshlash (faqat safar boshlanmagan bo'lsa chiqadi)
         if is_riding == 0:
             btns.append([InlineKeyboardButton(text="🚖 Safarni boshlash", callback_data="ride_start")])
         
+        # 3. Safarni yakunlash
         btns.append([InlineKeyboardButton(text="🏁 Safarni yakunlash", callback_data="fin_pre")])
         
-        txt = f"{'🚖 Safarda' if is_riding else '⏳ Kutishda'}\n\n⏱ Ojidaniye: {int(curr_wait)} daq\n🛣 Masofa: {total_dist:.2f} km\n💰 Hisob: {int(summa)} so'm"
+        txt = f"{'🚖 SAFARDA' if is_riding else '⏳ KUTISHDA'}\n\n⏱ Ojidaniye: {int(curr_wait)} daq\n🛣 Masofa: {total_dist:.2f} km\n💰 Hisob: {int(summa)} so'm"
         
         try:
             await driver_bot.edit_message_text(chat_id=did, message_id=d_msg_id, text=txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
@@ -111,48 +112,52 @@ async def taximeter_loop(did):
         conn.close()
 
 # ==========================================
-# 👨‍✈️ DRIVER HANDLERS
+# 👨‍✈️ DRIVER BOT LOGIC
 # ==========================================
 
 @driver_dp.message(F.location)
-async def dr_loc_handler(message: types.Message):
+async def dr_loc_receiver(message: types.Message):
+    """Haydovchi harakatlanganda masofani hisoblash markazi"""
     lat, lon = message.location.latitude, message.location.longitude
     did = message.from_user.id
     conn = sqlite3.connect(DB_FILE)
     
-    # Haydovchi koordinatasini har doim yangilash
+    # Haydovchining joriy lokatsiyasini bazada yangilash
     conn.execute("UPDATE drivers SET lat=?, lon=? WHERE user_id=?", (lat, lon, did))
     
-    # Safar ketayotgan bo'lsa masofani hisoblash
+    # Agar haydovchi safar (is_riding=1) rejimida bo'lsa masofani hisoblash
     tr = conn.execute("SELECT is_riding, last_lat, last_lon, total_dist FROM trips WHERE driver_id=?", (did,)).fetchone()
     if tr and tr[0] == 1:
         last_lat, last_lon, total_dist = tr[1], tr[2], tr[3]
         if last_lat > 0:
-            dist_step = get_dist(last_lat, last_lon, lat, lon)
-            # 10 metrdan kam harakatni va 1 kmdan ko'p sakrashni hisobga olmaymiz (GPS xatosi)
-            if 0.01 < dist_step < 1.0:
-                new_dist = total_dist + dist_step
+            step = get_dist(last_lat, last_lon, lat, lon)
+            # 10 metrdan ko'p va 1 kmdan kam harakatni hisobga olamiz (GPS sakrashlarini filtrlash)
+            if 0.01 < step < 1.0:
+                new_dist = total_dist + step
                 conn.execute("UPDATE trips SET total_dist=?, last_lat=?, last_lon=? WHERE driver_id=?", (new_dist, lat, lon, did))
         else:
+            # Birinchi marta koordinata yozish
             conn.execute("UPDATE trips SET last_lat=?, last_lon=? WHERE driver_id=?", (lat, lon, did))
     
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 @driver_dp.callback_query(F.data == "ride_start")
-async def ride_start(call: CallbackQuery):
+async def ride_start_handler(call: CallbackQuery):
     conn = sqlite3.connect(DB_FILE)
     dr = conn.execute("SELECT lat, lon FROM drivers WHERE user_id=?", (call.from_user.id,)).fetchone()
     tr = conn.execute("SELECT wait_start, total_wait FROM trips WHERE driver_id=?", (call.from_user.id,)).fetchone()
     
-    # Ojidaniyani to'xtatib masofa hisobini yoqish
+    # Ojidaniyani to'xtatib, safar va masofa hisobini yoqish
     new_wait = tr[1] + ((time.time() - tr[0])/60 if tr[0] > 0 else 0)
     conn.execute("UPDATE trips SET is_riding=1, wait_start=0, total_wait=?, last_lat=?, last_lon=? WHERE driver_id=?", 
                  (new_wait, dr[0], dr[1], call.from_user.id))
-    conn.commit(); conn.close()
-    await call.answer("Safar va GPS hisobi boshlandi!")
+    conn.commit()
+    conn.close()
+    await call.answer("Oq yo'l! Safar boshlandi.")
 
 @driver_dp.callback_query(F.data == "arrived")
-async def arrived(call: CallbackQuery):
+async def arrived_handler(call: CallbackQuery):
     conn = sqlite3.connect(DB_FILE)
     conn.execute("UPDATE trips SET wait_start=? WHERE driver_id=?", (time.time(), call.from_user.id))
     conn.commit(); conn.close()
@@ -163,7 +168,7 @@ async def arrived(call: CallbackQuery):
 async def wait_play(call: CallbackQuery):
     conn = sqlite3.connect(DB_FILE)
     conn.execute("UPDATE trips SET wait_start=? WHERE driver_id=?", (time.time(), call.from_user.id))
-    conn.commit(); conn.close(); await call.answer("Ojidaniye yoqildi")
+    conn.commit(); conn.close(); await call.answer("Ojidaniye boshlandi")
 
 @driver_dp.callback_query(F.data == "wait_pause")
 async def wait_pause(call: CallbackQuery):
@@ -173,28 +178,30 @@ async def wait_pause(call: CallbackQuery):
         new_total = tr[1] + ((time.time() - tr[0]) / 60)
         conn.execute("UPDATE trips SET wait_start=0, total_wait=? WHERE driver_id=?", (new_total, call.from_user.id))
         conn.commit()
-    conn.close(); await call.answer("Ojidaniye pauza qilindi")
+    conn.close(); await call.answer("Pauza")
 
 @driver_dp.callback_query(F.data == "fin_pre")
-async def finish(call: CallbackQuery):
-    conn = sqlite3.connect(DB_FILE); tr = conn.execute("SELECT * FROM trips WHERE driver_id=?", (call.from_user.id,)).fetchone()
+async def finish_trip(call: CallbackQuery):
+    conn = sqlite3.connect(DB_FILE)
+    tr = conn.execute("SELECT * FROM trips WHERE driver_id=?", (call.from_user.id,)).fetchone()
     if tr:
         w_min = tr[4] + ((time.time() - tr[3])/60 if tr[3] > 0 else 0)
         total = START_PRICE + (int(w_min) * WAIT_PRICE) + (tr[7] * KM_PRICE)
-        res = f"🏁 Safar yakunlandi!\n💰 Jami: {int(total)} so'm\n🛣 Masofa: {tr[7]:.2f} km\n⏱ Kutish: {int(w_min)} daq"
-        await call.message.edit_text(res); await client_bot.send_message(tr[1], res)
+        res = f"🏁 Safar yakunlandi!\n\n⏱ Ojidaniye: {int(w_min)} daq\n🛣 Masofa: {tr[7]:.2f} km\n💰 Jami: {int(total)} so'm"
+        await call.message.edit_text(res)
+        await client_bot.send_message(tr[1], res)
         conn.execute("UPDATE drivers SET status='online' WHERE user_id=?", (call.from_user.id,))
-        conn.execute("DELETE FROM trips WHERE driver_id=?", (call.from_user.id,)); conn.commit()
+        conn.execute("DELETE FROM trips WHERE driver_id=?", (call.from_user.id,))
+        conn.commit()
     conn.close()
 
-# ==========================================
-# 🔄 REGISTRATION & ORDER FLOW (SKIP/ACC)
-# ==========================================
+# --- QOLGAN FUNKSIYALAR (REG, SKIP, ACC) ---
 
 @driver_dp.message(Command("start"))
 async def dr_start(message: types.Message, command: CommandObject, state: FSMContext):
     if command.args and command.args.startswith("gr_"):
-        p = command.args.split("_"); return await start_trip_logic(message.from_user.id, int(p[1]), p[4], float(p[2]), float(p[3]))
+        p = command.args.split("_")
+        return await start_trip_logic(message.from_user.id, int(p[1]), p[4], float(p[2]), float(p[3]))
     conn = sqlite3.connect(DB_FILE); user = conn.execute("SELECT car_num FROM drivers WHERE user_id=?", (message.from_user.id,)).fetchone(); conn.close()
     if not user: await state.set_state(DriverReg.name); await message.answer("Ismingizni kiriting:")
     else:
@@ -220,27 +227,27 @@ async def dr_model(message: types.Message, state: FSMContext):
 async def dr_final(message: types.Message, state: FSMContext):
     d = await state.get_data(); conn = sqlite3.connect(DB_FILE)
     conn.execute("INSERT OR REPLACE INTO drivers (user_id, name, phone, car, car_num, status) VALUES (?,?,?,?,?,'online')", (message.from_user.id, d['name'], d['phone'], d['model'], message.text))
-    conn.commit(); conn.close(); await state.clear(); await message.answer("✅ Ro'yxatdan o'tdingiz! /start bosing.")
+    conn.commit(); conn.close(); await state.clear(); await message.answer("✅ Ro'yxatdan o'tdingiz! /start")
 
 @driver_dp.callback_query(F.data.startswith("skip_"))
 async def skip_order(call: CallbackQuery):
-    _, cid, cph, lat, lon = call.data.split("_"); await call.message.edit_text("🔄 Rad etildi."); await find_and_send_driver(int(cid), "Mijoz", cph, float(lat), float(lon), exclude_id=call.from_user.id)
+    _, cid, cph, lat, lon = call.data.split("_")
+    await call.message.edit_text("🔄 Rad etildi."); await find_and_send_driver(int(cid), "Mijoz", cph, float(lat), float(lon), exclude_id=call.from_user.id)
 
 @driver_dp.callback_query(F.data.startswith("acc_"))
 async def acc_order(call: CallbackQuery):
-    _, cid, cph, lat, lon = call.data.split("_"); await start_trip_logic(call.from_user.id, int(cid), cph, float(lat), float(lon), call.message)
+    _, cid, cph, lat, lon = call.data.split("_")
+    await start_trip_logic(call.from_user.id, int(cid), cph, float(lat), float(lon), call.message)
 
 async def start_trip_logic(did, cid, cph, lat, lon, msg=None):
     conn = sqlite3.connect(DB_FILE); d = conn.execute("SELECT name, phone, car, car_num FROM drivers WHERE user_id=?", (did,)).fetchone()
-    c_msg = await client_bot.send_message(cid, f"🚕 Haydovchi: {d[0]}\n🚗 {d[2]} ({d[3]})\n📞 {d[1]}")
+    c_msg = await client_bot.send_message(cid, f"🚕 Haydovchi topildi: {d[0]}\n🚗 {d[2]} ({d[3]})\n📞 {d[1]}")
     ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚕 Yetib keldim", callback_data="arrived")]])
     d_msg = await msg.edit_text(f"✅ Qabul qilindi. Mijoz: {cph}", reply_markup=ikb) if msg else await driver_bot.send_message(did, f"✅ Qabul qilindi. Mijoz: {cph}", reply_markup=ikb)
     conn.execute("INSERT OR REPLACE INTO trips (driver_id, client_id, client_phone, driver_msg_id, client_msg_id) VALUES (?,?,?,?,?)", (did, cid, cph, d_msg.message_id, c_msg.message_id))
     conn.execute("UPDATE drivers SET status='busy' WHERE user_id=?", (did,)); conn.commit(); conn.close()
 
-# ==========================================
-# 🚕 MIJOZ BOTI
-# ==========================================
+# --- MIJOZ BOTI ---
 
 @client_dp.message(Command("start"))
 async def client_start(message: types.Message):
