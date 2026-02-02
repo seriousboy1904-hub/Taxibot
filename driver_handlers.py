@@ -1,47 +1,72 @@
-from aiogram import Router, F, types
-from aiogram.fsm.context import FSMContext
+from aiogram import Router, F
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.filters import Command
-from helpers import find_nearest_station, get_distance
-from database import Database
-from config import STATIONS
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+import database as db
 
-driver_router = Router()
-db = Database("taxi.db")
+router = Router()
 
-@driver_router.message(Command("start"))
-async def start_driver(message: types.Message):
-    await message.answer("Salom! Navbatga turish uchun 'Share My Live Location' yuboring.")
+# Holatlarni aniqlaymiz
+class DriverReg(StatesGroup):
+    name = State()
+    car_info = State()
+    phone = State()
+    location = State()
 
-@driver_router.message(F.location)
-@driver_router.edited_message(F.location)
-async def handle_driver_location(message: types.Message, state: FSMContext):
-    lat, lon = message.location.latitude, message.location.longitude
-    station_name, dist = find_nearest_station(lat, lon, STATIONS)
-    status_label = station_name if dist <= 0.6 else "Yo'lda"
+@router.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    # Bazadan haydovchini tekshiramiz
+    driver = db.get_driver(message.from_user.id)
+    if driver:
+        await message.answer("Siz allaqachon ro'yxatdan o'tgansiz. Buyurtmalar kutishingiz mumkin!")
+    else:
+        await message.answer("Xush kelibsiz! Haydovchi sifatida ro'yxatdan o'tamiz.\nIsmingizni kiriting:")
+        await state.set_state(DriverReg.name)
+
+@router.message(DriverReg.name)
+async def process_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("Mashina rusumi va davlat raqamini kiriting (masalan: Gentra 01 A 777 AA):")
+    await state.set_state(DriverReg.car_info)
+
+@router.message(DriverReg.car_info)
+async def process_car(message: Message, state: FSMContext):
+    await state.update_data(car_info=message.text)
     
-    data = await state.get_data()
-    if data.get("on_trip"):
-        total = data.get("total_dist", 0)
-        last_l = data.get("last_l")
-        if last_l:
-            total += get_distance(last_l[0], last_l[1], lat, lon)
-        await state.update_data(total_dist=total, last_l=(lat, lon))
-        db.update_driver_status(message.from_user.id, lat, lon, "Safarda", "busy")
-    else:
-        db.update_driver_status(message.from_user.id, lat, lon, status_label, "idle")
+    kb = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Kontaktni yuborish", request_contact=True)]
+    ], resize_keyboard=True)
+    
+    await message.answer("Telefon raqamingizni yuboring:", reply_markup=kb)
+    await state.set_state(DriverReg.phone)
 
-@driver_router.callback_query(F.data.startswith("accept_"))
-async def accept_order(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(on_trip=True, total_dist=0, last_l=None)
-    db.update_driver_status(call.from_user.id, 0, 0, "Safarda", "busy")
-    await call.message.edit_text(call.message.text + "\n\n✅ Qabul qilindi. Safar boshlandi. Tugatish: /finish")
-    await call.answer()
+@router.message(DriverReg.phone, F.contact)
+async def process_phone(message: Message, state: FSMContext):
+    await state.update_data(phone=message.contact.phone_number)
+    
+    kb = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Joylashuvni yuborish", request_location=True)]
+    ], resize_keyboard=True)
+    
+    await message.answer("Hozirgi turgan joyingizni yuboring:", reply_markup=kb)
+    await state.set_state(DriverReg.location)
 
-@driver_router.message(Command("finish"))
-async def finish_trip(message: types.Message, state: FSMContext):
+@router.message(DriverReg.location, F.location)
+async def process_location(message: Message, state: FSMContext):
     data = await state.get_data()
-    if data.get("on_trip"):
-        await message.answer(f"🏁 Safar tugadi. Masofa: {data.get('total_dist', 0):.2f} km")
-        await state.clear()
-    else:
-        await message.answer("Siz safarda emassiz.")
+    lat = message.location.latitude
+    lon = message.location.longitude
+    
+    # Bazaga saqlaymiz
+    db.add_driver(
+        message.from_user.id, 
+        data['name'], 
+        data['car_info'], 
+        data['phone'], 
+        lat, 
+        lon
+    )
+    
+    await message.answer("Muvaffaqiyatli ro'yxatdan o'tdingiz! Endi buyurtmalarni qabul qilishingiz mumkin.", reply_markup=ReplyKeyboardRemove())
+    await state.clear()
