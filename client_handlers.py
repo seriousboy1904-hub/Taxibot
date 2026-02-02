@@ -6,7 +6,7 @@ from helpers import find_nearest_station
 from config import STATIONS, DRIVER_TOKEN
 from aiogram import Bot
 
-client_router = Router()
+client_router = client_router
 db = Database("taxi.db")
 driver_bot = Bot(token=DRIVER_TOKEN)
 
