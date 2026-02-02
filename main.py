@@ -2,27 +2,31 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from config import CLIENT_TOKEN, DRIVER_TOKEN
-from client_handlers import client_router
+from client_handlers import router as client_router
 from driver_handlers import router as driver_router
-# ... boshqa importlar
-dp.include_router(driver_router)
-
-logging.basicConfig(level=logging.INFO)
+import database as db
 
 async def main():
+    logging.basicConfig(level=logging.INFO)
+    
+    # Ma'lumotlar bazasini yaratish
+    db.init_db()
+
+    # Botlarni yaratish
     client_bot = Bot(token=CLIENT_TOKEN)
     driver_bot = Bot(token=DRIVER_TOKEN)
-    dp_client = Dispatcher()
-    dp_driver = Dispatcher()
 
-    dp_client.include_router(client_router)
-    dp_driver.include_router(driver_router)
+    dp = Dispatcher()
 
-    print("🚀 Botlar muvaffaqiyatli ishga tushdi!")
-    await asyncio.gather(
-        dp_client.start_polling(client_bot),
-        dp_driver.start_polling(driver_bot)
-    )
+    # Routerlarni ulash
+    dp.include_router(client_router)
+    dp.include_router(driver_router)
+
+    # Ikkala botni bir vaqtda ishga tushirish
+    await dp.start_polling(client_bot, driver_bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot to'xtatildi")
