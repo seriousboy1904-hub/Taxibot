@@ -13,10 +13,10 @@ driver_bot = Bot(token=DRIVER_TOKEN)
 @client_router.message(Command("start"))
 async def start_client(message: types.Message):
     kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📱 Kontakt yuborish", request_contact=True)],
+        [KeyboardButton(text="📱 Kontaktni yuborish", request_contact=True)],
         [KeyboardButton(text="📍 Taksi chaqirish", request_location=True)]
     ], resize_keyboard=True)
-    await message.answer("Salom! Botdan foydalanish uchun kontakt va joylashuvni yuboring.", reply_markup=kb)
+    await message.answer("Xush kelibsiz! Avval kontaktni, so'ngra joylashuvni yuboring.", reply_markup=kb)
 
 @client_router.message(F.location)
 async def handle_client_order(message: types.Message):
@@ -28,11 +28,14 @@ async def handle_client_order(message: types.Message):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Qabul qilish", callback_data=f"accept_{message.from_user.id}")]
         ])
-        await driver_bot.send_message(
-            next_driver['user_id'],
-            f"🚕 Buyurtma!\n📍 Bekat: {station_name}\n👤 Mijoz: {message.from_user.full_name}",
-            reply_markup=kb
-        )
-        await message.answer(f"Sizga eng yaqin bekat: {station_name}. Haydovchi topildi!")
+        try:
+            await driver_bot.send_message(
+                next_driver['user_id'],
+                f"🚕 Yangi buyurtma!\n📍 Bekat: {station_name}\n👤 Mijoz: {message.from_user.full_name}",
+                reply_markup=kb
+            )
+            await message.answer(f"Sizga eng yaqin bekat: {station_name}. Haydovchiga xabar yuborildi!")
+        except:
+            await message.answer("Haydovchi bilan bog'lanishda xato.")
     else:
         await message.answer(f"Hozircha {station_name} bekatida bo'sh haydovchi yo'q.")
