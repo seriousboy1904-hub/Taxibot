@@ -1,12 +1,12 @@
 from aiogram import Router, F, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import Database
 from helpers import find_nearest_station
-from config import DRIVER_TOKEN
+from config import DRIVER_TOKEN, STATIONS
 from aiogram import Bot
 
 client_router = Router()
 db = Database("taxi.db")
-# Haydovchiga xabar yuborish uchun Driver Bot obyektini yaratamiz
 driver_bot_sender = Bot(token=DRIVER_TOKEN)
 
 @client_router.message(F.location)
@@ -15,18 +15,26 @@ async def handle_client_order(message: types.Message):
     c_lon = message.location.longitude
     
     # 1. Mijozga eng yaqin bekatni topamiz
-    from config import STATIONS
     station_name, _ = find_nearest_station(c_lat, c_lon, STATIONS)
     
     # 2. Bazadan shu bekatdagi navbatdagi bo'sh haydovchini olamiz
     next_driver = db.get_first_driver_in_queue(station_name)
     
     if next_driver:
-        # Haydovchi botiga xabar yuboramiz
-        await driver_bot_sender.send_message(
-            next_driver['user_id'],
-            f"🚕 Navbat bo'yicha buyurtma!\n📍 Bekat: {station_name}\n👤 Mijoz: {message.from_user.full_name}"
-        )
-        await message.answer(f"Sizga eng yaqin bekat: {station_name}. Haydovchi yo'lga chiqdi!")
+        # Haydovchiga yuboriladigan tugma (Mijoz ID-si bilan)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Qabul qilish", callback_data=f"accept_{message.from_user.id}")]
+        ])
+        
+        try:
+            # Haydovchi botiga xabar yuboramiz
+            await driver_bot_sender.send_message(
+                next_driver['user_id'],
+                f"🚕 Yangi buyurtma!\n📍 Bekat: {station_name}\n👤 Mijoz: {message.from_user.full_name}",
+                reply_markup=kb
+            )
+            await message.answer(f"Sizga eng yaqin bekat: {station_name}. Haydovchi topildi, xabar yuborildi!")
+        except Exception as e:
+            await message.answer("Haydovchi bilan bog'lanishda xatolik yuz berdi.")
     else:
-        await message.answer("Hozircha bu bekatda bo'sh haydovchilar yo'q.")
+        await message.answer(f"Hozircha {station_name} bekatida bo'sh haydovchilar yo'q.")
