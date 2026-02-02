@@ -1,24 +1,28 @@
 import asyncio
-import logging
 from aiogram import Bot, Dispatcher
 from config import CLIENT_TOKEN, DRIVER_TOKEN
-from client_handlers import client_router # Nomiga e'tibor bering
-from driver_handlers import driver_router # Nomiga e'tibor bering
-import database as db
+from client_handlers import client_router
+from driver_handlers import driver_router
 
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    db.init_db()
+    # Botlarni yaratamiz
+    client_bot = Bot(token=CLIENT_TOKEN)
+    driver_bot = Bot(token=DRIVER_TOKEN)
 
-    bot_client = Bot(token=CLIENT_TOKEN)
-    bot_driver = Bot(token=DRIVER_TOKEN)
+    # Har bir bot uchun alohida dispatcher yoki bitta dispatcherni bo'lish
+    dp_client = Dispatcher()
+    dp_driver = Dispatcher()
 
-    dp = Dispatcher()
-    dp.include_router(client_router)
-    dp.include_router(driver_router)
+    # Routerlarni ulaymiz
+    dp_client.include_router(client_router)
+    dp_driver.include_router(driver_router)
 
-    logging.info("Botlar ishga tushdi...")
-    await dp.start_polling(bot_client, bot_driver)
+    # Ikkala botni ham bir vaqtda ishga tushiramiz
+    print("Botlar ishga tushdi...")
+    await asyncio.gather(
+        dp_client.start_polling(client_bot),
+        dp_driver.start_polling(driver_bot)
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())

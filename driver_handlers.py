@@ -1,72 +1,74 @@
-from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from aiogram.filters import Command
+from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-import database as db
+from aiogram.filters import Command # /finish buyrug'i uchun kerak
+from helpers import find_nearest_station, get_distance
+from database import Database
+from config import STATIONS
 
-router = driver_router
+driver_router = Router()
+db = Database("taxi.db")
 
-# Holatlarni aniqlaymiz
-class DriverReg(StatesGroup):
-    name = State()
-    car_info = State()
-    phone = State()
-    location = State()
-
-@router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    # Bazadan haydovchini tekshiramiz
-    driver = db.get_driver(message.from_user.id)
-    if driver:
-        await message.answer("Siz allaqachon ro'yxatdan o'tgansiz. Buyurtmalar kutishingiz mumkin!")
-    else:
-        await message.answer("Xush kelibsiz! Haydovchi sifatida ro'yxatdan o'tamiz.\nIsmingizni kiriting:")
-        await state.set_state(DriverReg.name)
-
-@router.message(DriverReg.name)
-async def process_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("Mashina rusumi va davlat raqamini kiriting (masalan: Gentra 01 A 777 AA):")
-    await state.set_state(DriverReg.car_info)
-
-@router.message(DriverReg.car_info)
-async def process_car(message: Message, state: FSMContext):
-    await state.update_data(car_info=message.text)
-    
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="Kontaktni yuborish", request_contact=True)]
-    ], resize_keyboard=True)
-    
-    await message.answer("Telefon raqamingizni yuboring:", reply_markup=kb)
-    await state.set_state(DriverReg.phone)
-
-@router.message(DriverReg.phone, F.contact)
-async def process_phone(message: Message, state: FSMContext):
-    await state.update_data(phone=message.contact.phone_number)
-    
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="Joylashuvni yuborish", request_location=True)]
-    ], resize_keyboard=True)
-    
-    await message.answer("Hozirgi turgan joyingizni yuboring:", reply_markup=kb)
-    await state.set_state(DriverReg.location)
-
-@router.message(DriverReg.location, F.location)
-async def process_location(message: Message, state: FSMContext):
-    data = await state.get_data()
+# 1. HAYDOVCHI LIVE LOCATION YUBORGANDA (Navbat tizimi)
+@driver_router.edited_message(F.location)
+async def handle_driver_live_location(message: types.Message, state: FSMContext):
     lat = message.location.latitude
     lon = message.location.longitude
+    driver_id = message.from_user.id
     
-    # Bazaga saqlaymiz
-    db.add_driver(
-        message.from_user.id, 
-        data['name'], 
-        data['car_info'], 
-        data['phone'], 
-        lat, 
-        lon
-    )
+    # Haydovchining hozirgi holatini (FSM xotirasidan) olamiz
+    data = await state.get_data()
+    on_trip = data.get("on_trip", False)
+
+    # Eng yaqin bekatni aniqlash
+    station_name, dist = find_nearest_station(lat, lon, STATIONS)
+    current_station = station_name if dist <= 0.5 else "Yo'lda"
     
-    await message.answer("Muvaffaqiyatli ro'yxatdan o'tdingiz! Endi buyurtmalarni qabul qilishingiz mumkin.", reply_markup=ReplyKeyboardRemove())
-    await state.clear()
+    # AGAR HAYDOVCHI SAFARDA BO'LSA (Taksometr qismi)
+    if on_trip:
+        total_dist = data.get("total_distance", 0)
+        last_lat = data.get("last_lat", lat)
+        last_lon = data.get("last_lon", lon)
+        
+        # Masofani hisoblash
+        step = get_distance(last_lat, last_lon, lat, lon)
+        if step > 0.01: # 10 metrdan ortiq siljish bo'lsa hisobga oladi
+            total_dist += step
+            
+        await state.update_data(total_distance=total_dist, last_lat=lat, last_lon=lon)
+        # Bazada faqat joylashuvni yangilaymiz, status 'busy'ligicha qoladi
+        db.update_driver_status(driver_id, lat, lon, current_station, status="busy")
+    else:
+        # AGAR HAYDOVCHI BO'SH BO'LSA
+        db.update_driver_status(driver_id, lat, lon, current_station, status="idle")
+
+# 2. HAYDOVCHI BUYURTMANI QABUL QILGANDA
+@driver_router.callback_query(F.data.startswith("accept_"))
+async def start_taxometer(callback: types.CallbackQuery, state: FSMContext):
+    # Safar ma'lumotlarini nolga tushiramiz
+    await state.update_data(on_trip=True, total_distance=0, last_lat=None, last_lon=None)
+    
+    # Statusni 'busy' (band) qilamiz
+    db.update_driver_status(callback.from_user.id, 0, 0, "Safarda", status="busy")
+    
+    await callback.message.answer("🚖 Safar boshlandi. Taksometr masofani o'lchamoqda.")
+    await callback.answer()
+
+# 3. SAFAR YAKUNI (Siz so'ragan qism)
+@driver_router.message(Command("finish"))
+async def finish_trip(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    
+    # Agar haydovchi haqiqatda safarda bo'lsa
+    if data.get("on_trip"):
+        dist = data.get("total_distance", 0)
+        
+        # Yakuniy hisobot
+        await message.answer(f"🏁 Safar tugadi!\n📏 Masofa: {dist:.2f} km.\n\nSiz yana bo'sh (idle) holatiga qaytdingiz va navbatga qo'shildingiz.")
+        
+        # Statusni 'idle'ga qaytarib, bazani yangilaymiz
+        db.update_driver_status(message.from_user.id, data.get("last_lat"), data.get("last_lon"), "Bekatda", status="idle")
+        
+        # Xotirani tozalaymiz
+        await state.clear()
+    else:
+        await message.answer("Siz hozir safarda emassiz.")
