@@ -10,18 +10,17 @@ db = Database("taxi.db")
 
 @driver_router.message(Command("start"))
 async def start_driver(message: types.Message):
-    await message.answer("Salom! Navbatga turish uchun Live Location yuboring.")
+    await message.answer("Salom! Navbatga turish uchun 'Share My Live Location' yuboring.")
 
 @driver_router.message(F.location)
 @driver_router.edited_message(F.location)
-async def handle_driver_loc(message: types.Message, state: FSMContext):
+async def handle_driver_location(message: types.Message, state: FSMContext):
     lat, lon = message.location.latitude, message.location.longitude
     station_name, dist = find_nearest_station(lat, lon, STATIONS)
     status_label = station_name if dist <= 0.6 else "Yo'lda"
     
     data = await state.get_data()
     if data.get("on_trip"):
-        # Taksometr mantiqi
         total = data.get("total_dist", 0)
         last_l = data.get("last_l")
         if last_l:
@@ -35,7 +34,7 @@ async def handle_driver_loc(message: types.Message, state: FSMContext):
 async def accept_order(call: types.CallbackQuery, state: FSMContext):
     await state.update_data(on_trip=True, total_dist=0, last_l=None)
     db.update_driver_status(call.from_user.id, 0, 0, "Safarda", "busy")
-    await call.message.answer("Safar boshlandi! /finish orqali tugating.")
+    await call.message.edit_text(call.message.text + "\n\n✅ Qabul qilindi. Safar boshlandi. Tugatish: /finish")
     await call.answer()
 
 @driver_router.message(Command("finish"))
@@ -44,6 +43,5 @@ async def finish_trip(message: types.Message, state: FSMContext):
     if data.get("on_trip"):
         await message.answer(f"🏁 Safar tugadi. Masofa: {data.get('total_dist', 0):.2f} km")
         await state.clear()
-        # Endi haydovchi yana location yuborsa navbatga kiradi
     else:
         await message.answer("Siz safarda emassiz.")
