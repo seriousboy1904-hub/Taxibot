@@ -1,2 +1,5 @@
-aiogram
+aiogram==3.3.0
+pydantic==2.4.2
+aiohttp==3.9.5
+aiofiles==23.2.1
 python-dotenv
