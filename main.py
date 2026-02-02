@@ -3,7 +3,9 @@ import logging
 from aiogram import Bot, Dispatcher
 from config import CLIENT_TOKEN, DRIVER_TOKEN
 from client_handlers import client_router
-from driver_handlers import driver_router
+from driver_handlers import router as driver_router
+# ... boshqa importlar
+dp.include_router(driver_router)
 
 logging.basicConfig(level=logging.INFO)
 
