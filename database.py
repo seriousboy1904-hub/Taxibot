@@ -11,23 +11,24 @@ class Database:
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             full_name TEXT,
-            status TEXT DEFAULT 'idle', 
+            phone TEXT,
+            car_model TEXT,
+            car_number TEXT,
+            role TEXT, 
+            status TEXT DEFAULT 'offline', 
             current_station TEXT,
-            last_lat REAL, last_lon REAL,
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            joined_at TIMESTAMP
         )""")
         self.connection.commit()
 
-    def update_driver_status(self, user_id, lat, lon, station, status="idle"):
+    def register_driver(self, user_id, name, phone, car, number):
         with self.connection:
             return self.cursor.execute(
-                "INSERT OR REPLACE INTO users (user_id, last_lat, last_lon, current_station, status) VALUES (?, ?, ?, ?, ?)",
-                (user_id, lat, lon, station, status)
+                "INSERT OR REPLACE INTO users (user_id, full_name, phone, car_model, car_number, role) VALUES (?, ?, ?, ?, ?, 'driver')",
+                (user_id, name, phone, car, number)
             )
 
-    def get_first_driver_in_queue(self, station_name):
-        self.cursor.execute(
-            "SELECT user_id FROM users WHERE current_station = ? AND status = 'idle' ORDER BY joined_at ASC LIMIT 1",
-            (station_name,)
-        )
-        return self.cursor.fetchone()
+    def get_queue_info(self, station_name):
+        self.cursor.execute("SELECT COUNT(*) FROM users WHERE current_station = ? AND status = 'idle'", (station_name,))
+        count = self.cursor.fetchone()[0]
+        return count
