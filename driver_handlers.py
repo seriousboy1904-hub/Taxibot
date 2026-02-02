@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import database as db
 
-router = Router()
+router = driver_router
 
 # Holatlarni aniqlaymiz
 class DriverReg(StatesGroup):
